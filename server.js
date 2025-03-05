@@ -13,14 +13,6 @@ const pool = mysql.createPool({
   port: 3306,
 });
 
-function checkproduct(id) {
-  const check = 'SELECT product_price FROM Products WHERE product_id = ?';
-  pool.query(check, [id], (err, results) => {
-
-  })
-  const update_product = `UPDATE Products SET stock_quantity = ? WHERE product_id = ?`
-}
-
 let orderCache = null;
 
 app.post('/insertProducts', (req, res) => {
@@ -42,6 +34,18 @@ app.post('/insertProducts', (req, res) => {
     }
   });
 });
+
+app.post('/send_Order',(req,res) =>{
+
+  const sql = 'SELECT * FROM Orders';
+  pool.query(sql, (err, results) => {
+    if (err) {
+      console.error("Error fetching order:", err);
+      return res.status(500).json({ error: 'เกิดข้อผิดพลาดในการดึงข้อมูล' });
+    }
+    return res.status(200).json({results });
+  })
+})
 
 app.post('/Payments', (req, res) => {
   const { id_order } = req.body;
