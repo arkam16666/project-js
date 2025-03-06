@@ -197,8 +197,8 @@ app.post('/confirm', (req, res) => {
   return res.status(400).json({ error: "คำสั่งไม่ถูกต้อง" });
 });
 
-
-app.post('/Order_Items', (req, res) => {
+//Order เก่า
+app.post('/Order_Item', (req, res) => {
   const { customer_id, product_id, quantity } = req.body;
   console.log("Received Data:", req.body);
 
@@ -290,7 +290,138 @@ app.post('/Order_Items', (req, res) => {
   });
 });
 
+//Order ใหม่
+app.post("/Order_Items", (req, res) => {
+  const { customer_id, items } = req.body; // items เป็น array ของสินค้า [{product_id, quantity}]
+  console.log("Received Data:", req.body);
 
+  // if (!customer_id || !Array.isArray(items) || items.length === 0) {
+  //   return res.status(400).json({ error: "กรุณาส่งข้อมูลให้ครบถ้วน (customer_id, items[])" });
+  // }
+
+  // ตรวจสอบสินค้าทั้งหมดในรายการ
+  const productIds = items.map((item) => item.product_id);
+  const check_stock =
+    "SELECT product_id, product_price, stock_quantity FROM Products WHERE product_id IN (?)";
+
+  pool.query(check_stock, [productIds], (err, results) => {
+    if (err) {
+      console.error("Error fetching product data:", err);
+      return res
+        .status(500)
+        .json({ error: "เกิดข้อผิดพลาดในการดึงข้อมูลสินค้า" });
+    }
+
+    // แปลงข้อมูลเป็น Object เพื่อเข้าถึงง่าย
+    const productData = {};
+    results.forEach((row) => {
+      productData[row.product_id] = {
+        product_price: row.product_price,
+        stock_quantity: row.stock_quantity,
+      };
+    });
+
+    // ตรวจสอบว่าสินค้าทุกชิ้นมีในสต็อกหรือไม่
+    for (const item of items) {
+      if (!productData[item.product_id]) {
+        return res
+          .status(404)
+          .json({ error: `⚠️ ไม่พบสินค้า product_id: ${item.product_id}` });
+      }
+      if (productData[item.product_id].stock_quantity < item.quantity) {
+        return res
+          .status(400)
+          .json({
+            error: `สินค้า product_id: ${item.product_id} ไม่เพียงพอในสต็อก`,
+          });
+      }
+    }
+
+    // คำนวณราคารวมทั้งหมด
+    const total_amount = items.reduce(
+      (sum, item) =>
+        sum + productData[item.product_id].product_price * item.quantity,
+      0
+    );
+    const order_date = new Date();
+    const status = "รอชำระ";
+
+    // บันทึกคำสั่งซื้อ
+    const insert_order = `INSERT INTO Orders (customer_id, order_date, status, total_amount) VALUES (?, ?, ?, ?)`;
+    pool.query(
+      insert_order,
+      [customer_id, order_date, status, total_amount],
+      (err, result) => {
+        if (err) {
+          console.error("Error inserting order:", err);
+          return res
+            .status(500)
+            .json({ error: "เกิดข้อผิดพลาดในการบันทึกคำสั่งซื้อ" });
+        }
+
+        const order_id = result.insertId;
+
+        // เตรียมคำสั่ง SQL สำหรับเพิ่ม Order_Items
+        const orderItemsData = items.map((item) => [
+          order_id,
+          item.product_id,
+          item.quantity,
+          productData[item.product_id].product_price,
+        ]);
+        const insert_items = `INSERT INTO Order_Items (order_id, product_id, quantity, price) VALUES ?`;
+
+        pool.query(insert_items, [orderItemsData], (err, result) => {
+          if (err) {
+            console.error("Error inserting order items:", err);
+            return res
+              .status(500)
+              .json({
+                error: "เกิดข้อผิดพลาดในการบันทึกข้อมูลสินค้าคำสั่งซื้อ",
+              });
+          }
+
+          // อัปเดตสต็อกสินค้า
+          const updatePromises = items.map((item) => {
+            return new Promise((resolve, reject) => {
+              const update_stock = `UPDATE Products SET stock_quantity = stock_quantity - ? WHERE product_id = ?`;
+              pool.query(
+                update_stock,
+                [item.quantity, item.product_id],
+                (err, updateResult) => {
+                  if (err) reject(err);
+                  else
+                    resolve({
+                      product_id: item.product_id,
+                      new_stock_quantity:
+                        productData[item.product_id].stock_quantity -
+                        item.quantity,
+                    });
+                }
+              );
+            });
+          });
+
+          Promise.all(updatePromises)
+            .then((updatedStocks) => {
+              console.log("Stock updated successfully:", updatedStocks);
+              res.status(200).json({
+                message: "บันทึกข้อมูลสินค้าสำเร็จ",
+                order_id,
+                total_amount,
+                updatedStocks,
+              });
+            })
+            .catch((err) => {
+              console.error("Error updating stock quantity:", err);
+              res
+                .status(500)
+                .json({ error: "เกิดข้อผิดพลาดในการอัปเดตสต็อกสินค้า" });
+            });
+        });
+      }
+    );
+  });
+});
 
 app.post('/Customers', (req, res) => {
   const { customer_name, email, address, phone_number } = req.body;
@@ -313,7 +444,7 @@ app.post('/Customers', (req, res) => {
 })
 
 app.post('/report', (req, res) => {
-  const check = req.body.check;  // Access 'check' property from request body
+  const check = req.body.check;
 
   const generateReportSQL = `
   INSERT INTO daily_reports (order_id, order_date, customer_name, product_name, category_name, quantity, price, total_amount)
@@ -334,8 +465,6 @@ app.post('/report', (req, res) => {
   WHERE YEARWEEK(o.order_date, 1) = YEARWEEK(CURDATE(), 1);
   `;
 
-
-  // Check for 'save' operation
   if (check === "save") {
     pool.query(generateReportSQL, (err, results) => {
       if (err) {
@@ -358,7 +487,6 @@ app.post('/report', (req, res) => {
       }
     });
   }
-  // Check for 'view' operation
   else if (check === "view") {
     const view = `SELECT * FROM daily_reports`;
 
@@ -370,7 +498,6 @@ app.post('/report', (req, res) => {
       return res.status(200).json({ message: "รายงานถูกดึงข้อมูลเรียบร้อยแล้ว", data: report });
     });
   } else {
-    // In case the `check` value is neither "save" nor "view"
     res.status(400).json({ message: "ไม่พบคำสั่งที่ถูกต้อง" });
   }
 });
